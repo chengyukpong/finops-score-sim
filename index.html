@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EC2 Optimization Score Simulator</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@mui/material@5/umd/material-ui.production.min.js" crossorigin></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Roboto', sans-serif; background: #f5f5f5; min-height: 100vh; }
+        .gauge-container { position: relative; width: 220px; height: 220px; margin: 0 auto; }
+        .gauge-bg { fill: none; stroke: #e0e0e0; stroke-width: 12; }
+        .gauge-fill { fill: none; stroke-width: 12; stroke-linecap: round; transition: stroke-dashoffset 0.5s ease, stroke 0.5s ease; }
+        .gauge-text { font-size: 48px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+        .gauge-label { font-size: 14px; fill: #757575; text-anchor: middle; }
+        .factor-card { transition: transform 0.2s; }
+        .factor-card:hover { transform: translateY(-2px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const {
+            AppBar, Toolbar, Typography, Container, Grid, Card, CardContent,
+            Slider, TextField, Box, Chip, Divider, Paper, Tooltip, IconButton,
+            ThemeProvider, createTheme, CssBaseline, Stack, LinearProgress,
+            Checkbox, FormControlLabel
+        } = MaterialUI;
+
+        // ─── Scoring Functions ───────────────────────────────────────────
+
+        function calcRiScore(onDemandPrice, riPrice, riApplied) {
+            if (!riApplied) return 0;
+            if (onDemandPrice <= 0 || riPrice < 0) return 0;
+            if (riPrice >= onDemandPrice) return 0;
+            const savingsPct = ((onDemandPrice - riPrice) / onDemandPrice) * 100;
+            return Math.min(savingsPct, 100);
+        }
+
+        function calcHoursScore(detectedIdleHours, scheduledShutdownHours) {
+            if (detectedIdleHours <= 0) return 100;
+            if (scheduledShutdownHours <= 0) return 0;
+            return Math.min((scheduledShutdownHours / detectedIdleHours) * 100, 100);
+        }
+
+        function calcCpuScore(cpuPercent) {
+            if (cpuPercent < 0) return 0;
+            if (cpuPercent <= 60) {
+                return (cpuPercent / 60) * 100;
+            } else {
+                return Math.max(0, 100 - ((cpuPercent - 60) / 40) * 100);
+            }
+        }
+
+        function calcFinalScore(onDemandPrice, riPrice, riApplied, detectedIdleHours, scheduledShutdownHours, cpuPercent) {
+            const riScore = calcRiScore(onDemandPrice, riPrice, riApplied);
+            const hoursScore = calcHoursScore(detectedIdleHours, scheduledShutdownHours);
+            const cpuScore = calcCpuScore(cpuPercent);
+
+            const wRi = 0.4;
+            const wHours = 0.3;
+            const wCpu = 0.3;
+
+            const finalScore = wRi * riScore + wHours * hoursScore + wCpu * cpuScore;
+
+            return {
+                finalScore: Math.round(finalScore * 10) / 10,
+                factors: {
+                    ri: { score: Math.round(riScore * 10) / 10, weight: wRi, contribution: Math.round(wRi * riScore * 10) / 10 },
+                    hours: { score: Math.round(hoursScore * 10) / 10, weight: wHours, contribution: Math.round(wHours * hoursScore * 10) / 10 },
+                    cpu: { score: Math.round(cpuScore * 10) / 10, weight: wCpu, contribution: Math.round(wCpu * cpuScore * 10) / 10 }
+                }
+            };
+        }
+
+        function getScoreColor(score) {
+            if (score < 40) return '#f44336';
+            if (score < 70) return '#ff9800';
+            return '#4caf50';
+        }
+
+        function getScoreLabel(score) {
+            if (score < 20) return 'Very Poor';
+            if (score < 40) return 'Poor';
+            if (score < 60) return 'Fair';
+            if (score < 80) return 'Good';
+            return 'Excellent';
+        }
+
+        // ─── Gauge Component ─────────────────────────────────────────────
+
+        function ScoreGauge({ score }) {
+            const radius = 90;
+            const circumference = 2 * Math.PI * radius;
+            const progress = (score / 100) * circumference;
+            const offset = circumference - progress;
+            const color = getScoreColor(score);
+            const label = getScoreLabel(score);
+
+            return (
+                <Box className="gauge-container">
+                    <svg viewBox="0 0 220 220" width="220" height="220">
+                        <circle className="gauge-bg" cx="110" cy="110" r={radius} />
+                        <circle
+                            className="gauge-fill"
+                            cx="110" cy="110" r={radius}
+                            stroke={color}
+                            strokeDasharray={circumference}
+                            strokeDashoffset={offset}
+                            transform="rotate(-90 110 110)"
+                        />
+                        <text className="gauge-text" x="110" y="105" fill={color}>
+                            {score}
+                        </text>
+                        <text className="gauge-label" x="110" y="135">
+                            {label}
+                        </text>
+                    </svg>
+                </Box>
+            );
+        }
+
+        // ─── Factor Card Component ───────────────────────────────────────
+
+        function FactorCard({ title, icon, score, weight, contribution, color, children }) {
+            return (
+                <Card className="factor-card" sx={{ height: '100%' }}>
+                    <CardContent>
+                        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                            <span className="material-icons" style={{ color, fontSize: 24 }}>{icon}</span>
+                            <Typography variant="subtitle1" fontWeight={600}>{title}</Typography>
+                        </Stack>
+                        <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 1 }}>
+                            <Typography variant="h4" fontWeight={700} color={color}>{score}</Typography>
+                            <Chip label={`×${weight} = ${contribution}`} size="small" variant="outlined" />
+                        </Stack>
+                        <LinearProgress
+                            variant="determinate"
+                            value={score}
+                            sx={{
+                                height: 6, borderRadius: 3, mb: 2,
+                                '& .MuiLinearProgress-bar': { backgroundColor: color }
+                            }}
+                        />
+                        {children}
+                    </CardContent>
+                </Card>
+            );
+        }
+
+        // ─── Main App ────────────────────────────────────────────────────
+
+        function App() {
+            const [onDemandPrice, setOnDemandPrice] = React.useState(0.10);
+            const [riPrice, setRiPrice] = React.useState(0.06);
+            const [riApplied, setRiApplied] = React.useState(false);
+            const [detectedIdleHours, setDetectedIdleHours] = React.useState(56);
+            const [scheduledShutdownHours, setScheduledShutdownHours] = React.useState(0);
+            const [cpuPercent, setCpuPercent] = React.useState(60);
+
+            const result = calcFinalScore(onDemandPrice, riPrice, riApplied, detectedIdleHours, scheduledShutdownHours, cpuPercent);
+            const { finalScore, factors } = result;
+
+            const riColor = getScoreColor(factors.ri.score);
+            const hoursColor = getScoreColor(factors.hours.score);
+            const cpuColor = getScoreColor(factors.cpu.score);
+
+            const savingsPct = onDemandPrice > 0
+                ? Math.round(((onDemandPrice - riPrice) / onDemandPrice) * 100)
+                : 0;
+
+            const theme = createTheme({
+                palette: {
+                    primary: { main: '#1976d2' },
+                    secondary: { main: '#ff9800' }
+                }
+            });
+
+            return (
+                <ThemeProvider theme={theme}>
+                    <CssBaseline />
+                    <AppBar position="static" elevation={0}>
+                        <Toolbar>
+                            <span className="material-icons" style={{ marginRight: 12 }}>cloud</span>
+                            <Typography variant="h6" sx={{ flexGrow: 1 }}>
+                                EC2 Optimization Score Simulator
+                            </Typography>
+                            <Chip
+                                label={`Score: ${finalScore}`}
+                                color={finalScore >= 70 ? 'success' : finalScore >= 40 ? 'warning' : 'error'}
+                                sx={{ fontWeight: 700, fontSize: 16, px: 2 }}
+                            />
+                        </Toolbar>
+                    </AppBar>
+
+                    <Container maxWidth="lg" sx={{ py: 4 }}>
+                        <Grid container spacing={3}>
+                            {/* Score Gauge */}
+                            <Grid item xs={12} md={4}>
+                                <Paper sx={{ p: 3, textAlign: 'center' }}>
+                                    <Typography variant="overline" color="text.secondary">
+                                        Overall Optimization Score
+                                    </Typography>
+                                    <ScoreGauge score={finalScore} />
+                                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                                        Weights: RI 40% · Hours 30% · CPU 30%
+                                    </Typography>
+                                </Paper>
+                            </Grid>
+
+                            {/* Inputs */}
+                            <Grid item xs={12} md={8}>
+                                <Paper sx={{ p: 3 }}>
+                                    <Typography variant="h6" gutterBottom>
+                                        <span className="material-icons" style={{ verticalAlign: 'middle', marginRight: 8 }}>settings</span>
+                                        Instance Parameters
+                                    </Typography>
+                                    <Divider sx={{ mb: 3 }} />
+
+                                    {/* RI Pricing */}
+                                    <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                                        <Typography variant="subtitle2" color="primary" fontWeight={600}>
+                                            Reserved Instance Pricing
+                                        </Typography>
+                                        <FormControlLabel
+                                            control={
+                                                <Checkbox
+                                                    checked={riApplied}
+                                                    onChange={(e) => setRiApplied(e.target.checked)}
+                                                    size="small"
+                                                />
+                                            }
+                                            label="RI Applied"
+                                        />
+                                    </Stack>
+                                    <Grid container spacing={2} sx={{ mb: 3 }}>
+                                        <Grid item xs={6}>
+                                            <TextField
+                                                label="On-Demand Price ($/hr)"
+                                                type="number"
+                                                size="small"
+                                                fullWidth
+                                                value={onDemandPrice}
+                                                onChange={(e) => setOnDemandPrice(Math.max(0, parseFloat(e.target.value) || 0))}
+                                                inputProps={{ step: 0.01, min: 0 }}
+                                                disabled={!riApplied}
+                                            />
+                                        </Grid>
+                                        <Grid item xs={6}>
+                                            <TextField
+                                                label="RI Price ($/hr)"
+                                                type="number"
+                                                size="small"
+                                                fullWidth
+                                                value={riPrice}
+                                                onChange={(e) => setRiPrice(Math.max(0, parseFloat(e.target.value) || 0))}
+                                                inputProps={{ step: 0.01, min: 0 }}
+                                                disabled={!riApplied}
+                                            />
+                                        </Grid>
+                                        <Grid item xs={12}>
+                                            <Chip
+                                                label={riApplied ? `Savings: ${savingsPct}%` : 'RI not applied - score: 0'}
+                                                color={riApplied && savingsPct > 0 ? 'success' : 'default'}
+                                                size="small"
+                                            />
+                                        </Grid>
+                                    </Grid>
+
+                                    {/* Idle Hours & Scheduled Shutdown */}
+                                    <Typography variant="subtitle2" gutterBottom color="primary" fontWeight={600}>
+                                        Idle Hours & Scheduled Shutdown
+                                    </Typography>
+                                    <Grid container spacing={2} sx={{ mb: 3 }}>
+                                        <Grid item xs={6}>
+                                            <TextField
+                                                label="Detected Idle Hours/Week"
+                                                type="number"
+                                                size="small"
+                                                fullWidth
+                                                value={detectedIdleHours}
+                                                onChange={(e) => setDetectedIdleHours(Math.max(0, Math.min(168, parseInt(e.target.value) || 0)))}
+                                                inputProps={{ step: 1, min: 0, max: 168 }}
+                                            />
+                                        </Grid>
+                                        <Grid item xs={6}>
+                                            <TextField
+                                                label="Scheduled Shutdown Hours/Week"
+                                                type="number"
+                                                size="small"
+                                                fullWidth
+                                                value={scheduledShutdownHours}
+                                                onChange={(e) => setScheduledShutdownHours(Math.max(0, Math.min(168, parseInt(e.target.value) || 0)))}
+                                                inputProps={{ step: 1, min: 0, max: 168 }}
+                                            />
+                                        </Grid>
+                                        <Grid item xs={12}>
+                                            <Chip
+                                                label={`Coverage: ${detectedIdleHours > 0 ? Math.round((scheduledShutdownHours / detectedIdleHours) * 100) : 100}%`}
+                                                color={scheduledShutdownHours >= detectedIdleHours ? 'success' : 'warning'}
+                                                size="small"
+                                            />
+                                        </Grid>
+                                    </Grid>
+
+                                    {/* CPU Utilization */}
+                                    <Typography variant="subtitle2" gutterBottom color="primary" fontWeight={600}>
+                                        CPU Utilization (%)
+                                    </Typography>
+                                    <Box sx={{ px: 2 }}>
+                                        <Slider
+                                            value={cpuPercent}
+                                            onChange={(e, v) => setCpuPercent(v)}
+                                            min={0}
+                                            max={100}
+                                            step={1}
+                                            valueLabelDisplay="on"
+                                            marks={[
+                                                { value: 0, label: '0%' },
+                                                { value: 60, label: '60% (ideal)' },
+                                                { value: 100, label: '100%' }
+                                            ]}
+                                            sx={{
+                                                '& .MuiSlider-mark[data-index="1"]': {
+                                                    backgroundColor: '#4caf50',
+                                                    height: 12,
+                                                    width: 3
+                                                }
+                                            }}
+                                        />
+                                    </Box>
+                                </Paper>
+                            </Grid>
+
+                            {/* Factor Breakdown Cards */}
+                            <Grid item xs={12} md={4}>
+                                <FactorCard
+                                    title="RI Savings"
+                                    icon="savings"
+                                    score={factors.ri.score}
+                                    weight={factors.ri.weight}
+                                    contribution={factors.ri.contribution}
+                                    color={riColor}
+                                >
+                                    <Typography variant="body2" color="text.secondary">
+                                        {savingsPct}% savings vs On-Demand
+                                    </Typography>
+                                </FactorCard>
+                            </Grid>
+
+                            <Grid item xs={12} md={4}>
+                                <FactorCard
+                                    title="Idle Hours Coverage"
+                                    icon="schedule"
+                                    score={factors.hours.score}
+                                    weight={factors.hours.weight}
+                                    contribution={factors.hours.contribution}
+                                    color={hoursColor}
+                                >
+                                    <Typography variant="body2" color="text.secondary">
+                                        {scheduledShutdownHours}h scheduled / {detectedIdleHours}h idle
+                                    </Typography>
+                                </FactorCard>
+                            </Grid>
+
+                            <Grid item xs={12} md={4}>
+                                <FactorCard
+                                    title="Right-sizing (CPU)"
+                                    icon="memory"
+                                    score={factors.cpu.score}
+                                    weight={factors.cpu.weight}
+                                    contribution={factors.cpu.contribution}
+                                    color={cpuColor}
+                                >
+                                    <Typography variant="body2" color="text.secondary">
+                                        {cpuPercent}% CPU (target: 60%)
+                                    </Typography>
+                                </FactorCard>
+                            </Grid>
+
+                            {/* Formula Reference */}
+                            <Grid item xs={12}>
+                                <Paper sx={{ p: 3 }}>
+                                    <Typography variant="h6" gutterBottom>
+                                        <span className="material-icons" style={{ verticalAlign: 'middle', marginRight: 8 }}>functions</span>
+                                        Scoring Formulas
+                                    </Typography>
+                                    <Divider sx={{ mb: 2 }} />
+                                    <Grid container spacing={2}>
+                                        <Grid item xs={12} md={4}>
+                                            <Typography variant="subtitle2" color="primary">RI Savings Score</Typography>
+                                            <Typography variant="body2" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                                                (onDemand - riPrice) / onDemand × 100
+                                            </Typography>
+                                        </Grid>
+                                        <Grid item xs={12} md={4}>
+                                            <Typography variant="subtitle2" color="primary">Hours Score</Typography>
+                                            <Typography variant="body2" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                                                scheduledShutdown / detectedIdle × 100
+                                            </Typography>
+                                        </Grid>
+                                        <Grid item xs={12} md={4}>
+                                            <Typography variant="subtitle2" color="primary">CPU Score</Typography>
+                                            <Typography variant="body2" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                                                cpu ≤ 60 ? cpu/60×100 : max(0, 100-(cpu-60)/40×100)
+                                            </Typography>
+                                        </Grid>
+                                    </Grid>
+                                </Paper>
+                            </Grid>
+                        </Grid>
+                    </Container>
+                </ThemeProvider>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
