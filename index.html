@@ -30,17 +30,13 @@
             AppBar, Toolbar, Typography, Container, Grid, Card, CardContent,
             Slider, TextField, Box, Chip, Divider, Paper, Tooltip, IconButton,
             ThemeProvider, createTheme, CssBaseline, Stack, LinearProgress,
-            Checkbox, FormControlLabel
+            Checkbox, FormControlLabel, Select, MenuItem, FormControl, InputLabel
         } = MaterialUI;
 
         // ─── Scoring Functions ───────────────────────────────────────────
 
-        function calcRiScore(onDemandPrice, riPrice, riApplied) {
-            if (!riApplied) return 0;
-            if (onDemandPrice <= 0 || riPrice < 0) return 0;
-            if (riPrice >= onDemandPrice) return 0;
-            const savingsPct = ((onDemandPrice - riPrice) / onDemandPrice) * 100;
-            return Math.min(savingsPct, 100);
+        function calcRiScore(riApplied) {
+            return riApplied ? 100 : 0;
         }
 
         function calcHoursScore(detectedIdleHours, scheduledShutdownHours) {
@@ -58,22 +54,31 @@
             }
         }
 
-        function calcFinalScore(onDemandPrice, riPrice, riApplied, detectedIdleHours, scheduledShutdownHours, cpuPercent) {
-            const riScore = calcRiScore(onDemandPrice, riPrice, riApplied);
+        function calcFinalScore(riApplied, detectedIdleHours, scheduledShutdownHours, cpuPercent) {
+            const riScore = calcRiScore(riApplied);
             const hoursScore = calcHoursScore(detectedIdleHours, scheduledShutdownHours);
             const cpuScore = calcCpuScore(cpuPercent);
 
-            const wRi = 0.4;
-            const wHours = 0.3;
+            const wCost = 0.7;
             const wCpu = 0.3;
 
-            const finalScore = wRi * riScore + wHours * hoursScore + wCpu * cpuScore;
+            const costOptScore = riApplied ? riScore : hoursScore;
+            const costMethod = riApplied ? 'ri' : 'hours';
+            const finalScore = wCost * costOptScore + wCpu * cpuScore;
 
             return {
                 finalScore: Math.round(finalScore * 10) / 10,
                 factors: {
-                    ri: { score: Math.round(riScore * 10) / 10, weight: wRi, contribution: Math.round(wRi * riScore * 10) / 10 },
-                    hours: { score: Math.round(hoursScore * 10) / 10, weight: wHours, contribution: Math.round(wHours * hoursScore * 10) / 10 },
+                    ri: {
+                        score: Math.round(riScore * 10) / 10,
+                        weight: costMethod === 'ri' ? wCost : 0,
+                        contribution: costMethod === 'ri' ? Math.round(wCost * riScore * 10) / 10 : 0
+                    },
+                    hours: {
+                        score: Math.round(hoursScore * 10) / 10,
+                        weight: costMethod === 'hours' ? wCost : 0,
+                        contribution: costMethod === 'hours' ? Math.round(wCost * hoursScore * 10) / 10 : 0
+                    },
                     cpu: { score: Math.round(cpuScore * 10) / 10, weight: wCpu, contribution: Math.round(wCpu * cpuScore * 10) / 10 }
                 }
             };
@@ -157,14 +162,25 @@
         // ─── Main App ────────────────────────────────────────────────────
 
         function App() {
-            const [onDemandPrice, setOnDemandPrice] = React.useState(0.10);
+            const instancePrices = {
+                'm8g.medium': 0.04488,
+                'm8g.large': 0.08976,
+                'm8g.xlarge': 0.17952
+            };
+
+            const [instanceType, setInstanceType] = React.useState('m8g.xlarge');
+            const [currentInstanceType, setCurrentInstanceType] = React.useState('m8g.xlarge');
+            const [onDemandPrice, setOnDemandPrice] = React.useState(instancePrices['m8g.xlarge']);
             const [riPrice, setRiPrice] = React.useState(0.06);
             const [riApplied, setRiApplied] = React.useState(false);
+            const [riDiscount, setRiDiscount] = React.useState(50);
             const [detectedIdleHours, setDetectedIdleHours] = React.useState(56);
             const [scheduledShutdownHours, setScheduledShutdownHours] = React.useState(0);
-            const [cpuPercent, setCpuPercent] = React.useState(60);
 
-            const result = calcFinalScore(onDemandPrice, riPrice, riApplied, detectedIdleHours, scheduledShutdownHours, cpuPercent);
+            const currentCpuMap = { 'm8g.medium': 80, 'm8g.large': 60, 'm8g.xlarge': 40 };
+            const currentCpu = currentCpuMap[currentInstanceType] || 60;
+
+            const result = calcFinalScore(riApplied, detectedIdleHours, scheduledShutdownHours, currentCpuMap[instanceType]);
             const { finalScore, factors } = result;
 
             const riColor = getScoreColor(factors.ri.score);
@@ -209,8 +225,63 @@
                                     </Typography>
                                     <ScoreGauge score={finalScore} />
                                     <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                                        Weights: RI 40% · Hours 30% · CPU 30%
+                                        Weights: Cost Opt {riApplied ? '(RI)' : '(Shutdown)'} 70% · CPU 30%
                                     </Typography>
+                                </Paper>
+
+                                <Paper sx={{ p: 3, mt: 3 }}>
+                                    <Typography variant="overline" color="text.secondary" sx={{ display: 'block', textAlign: 'center', mb: 2 }}>
+                                        Weekly Cost
+                                    </Typography>
+                                    {(() => {
+                                        const currentHourly = instancePrices[currentInstanceType];
+                                        const baseWeekly = currentHourly * 168;
+                                        const runningHours = 168 - scheduledShutdownHours;
+                                        const optimizedWeekly = riApplied
+                                            ? riPrice * 168
+                                            : onDemandPrice * runningHours;
+                                        const savings = baseWeekly - optimizedWeekly;
+                                        const savingsPctOfBase = baseWeekly > 0 ? Math.round((savings / baseWeekly) * 100) : 0;
+                                        return (
+                                            <Stack spacing={2}>
+                                                <Box sx={{ textAlign: 'center' }}>
+                                                    <Typography variant="body2" color="text.secondary">
+                                                        Base ({currentInstanceType})
+                                                    </Typography>
+                                                    <Typography variant="h4" fontWeight={700}>
+                                                        ${baseWeekly.toFixed(2)}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        ${currentHourly.toFixed(4)}/hr × 168h
+                                                    </Typography>
+                                                </Box>
+
+                                                <Divider />
+
+                                                <Box sx={{ textAlign: 'center' }}>
+                                                    <Typography variant="body2" color="text.secondary">
+                                                        {riApplied ? 'RI Applied' : scheduledShutdownHours > 0 ? `Running ${runningHours}h/week` : 'No optimization'}
+                                                    </Typography>
+                                                    <Typography variant="h4" fontWeight={700} color={savings > 0 ? '#4caf50' : 'text.primary'}>
+                                                        ${optimizedWeekly.toFixed(2)}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {riApplied
+                                                            ? `$${riPrice.toFixed(4)}/hr × 168h`
+                                                            : `$${onDemandPrice.toFixed(4)}/hr × ${runningHours}h`}
+                                                    </Typography>
+                                                </Box>
+
+                                                {savings > 0 && (
+                                                    <Chip
+                                                        label={`Savings: $${savings.toFixed(2)}/week (${savingsPctOfBase}%)`}
+                                                        color="success"
+                                                        sx={{ alignSelf: 'center', fontWeight: 600, fontSize: 14 }}
+                                                    />
+                                                )}
+                                            </Stack>
+                                        );
+                                    })()}
                                 </Paper>
                             </Grid>
 
@@ -223,6 +294,53 @@
                                     </Typography>
                                     <Divider sx={{ mb: 3 }} />
 
+                                    {/* Instance Type */}
+                                    <Typography variant="subtitle2" color="primary" fontWeight={600} sx={{ mb: 1 }}>
+                                        Instance Type
+                                    </Typography>
+                                    <Grid container spacing={2} sx={{ mb: 3 }}>
+                                        <Grid item xs={6}>
+                                            <FormControl fullWidth size="small">
+                                                <InputLabel>Current Instance Type</InputLabel>
+                                                <Select
+                                                    value={currentInstanceType}
+                                                    label="Current Instance Type"
+                                                    onChange={(e) => setCurrentInstanceType(e.target.value)}
+                                                >
+                                                    {Object.keys(instancePrices).map((type) => (
+                                                        <MenuItem key={type} value={type}>
+                                                            {type} — ${instancePrices[type]}/hr
+                                                        </MenuItem>
+                                                    ))}
+                                                </Select>
+                                            </FormControl>
+                                        </Grid>
+                                        <Grid item xs={6}>
+                                            <FormControl fullWidth size="small">
+                                                <InputLabel>Target Instance Type</InputLabel>
+                                                <Select
+                                                    value={instanceType}
+                                                    label="Target Instance Type"
+                                                    onChange={(e) => {
+                                                        const type = e.target.value;
+                                                        setInstanceType(type);
+                                                        const price = instancePrices[type];
+                                                        setOnDemandPrice(price);
+                                                        if (riApplied) {
+                                                            setRiPrice(Math.round(price * (1 - riDiscount / 100) * 10000) / 10000);
+                                                        }
+                                                    }}
+                                                >
+                                                    {Object.keys(instancePrices).map((type) => (
+                                                        <MenuItem key={type} value={type}>
+                                                            {type} — ${instancePrices[type]}/hr
+                                                        </MenuItem>
+                                                    ))}
+                                                </Select>
+                                            </FormControl>
+                                        </Grid>
+                                    </Grid>
+
                                     {/* RI Pricing */}
                                     <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
                                         <Typography variant="subtitle2" color="primary" fontWeight={600}>
@@ -232,7 +350,13 @@
                                             control={
                                                 <Checkbox
                                                     checked={riApplied}
-                                                    onChange={(e) => setRiApplied(e.target.checked)}
+                                                    onChange={(e) => {
+                                                        setRiApplied(e.target.checked);
+                                                        if (e.target.checked) {
+                                                            setRiPrice(Math.round(onDemandPrice * (1 - riDiscount / 100) * 10000) / 10000);
+                                                            setScheduledShutdownHours(0);
+                                                        }
+                                                    }}
                                                     size="small"
                                                 />
                                             }
@@ -247,8 +371,7 @@
                                                 size="small"
                                                 fullWidth
                                                 value={onDemandPrice}
-                                                onChange={(e) => setOnDemandPrice(Math.max(0, parseFloat(e.target.value) || 0))}
-                                                inputProps={{ step: 0.01, min: 0 }}
+                                                inputProps={{ step: 0.01, min: 0, readOnly: true }}
                                                 disabled={!riApplied}
                                             />
                                         </Grid>
@@ -259,10 +382,42 @@
                                                 size="small"
                                                 fullWidth
                                                 value={riPrice}
-                                                onChange={(e) => setRiPrice(Math.max(0, parseFloat(e.target.value) || 0))}
+                                                onChange={(e) => {
+                                                    const val = Math.max(0, parseFloat(e.target.value) || 0);
+                                                    setRiPrice(val);
+                                                    if (riApplied && onDemandPrice > 0) {
+                                                        setRiDiscount(Math.round((1 - val / onDemandPrice) * 100));
+                                                    }
+                                                }}
                                                 inputProps={{ step: 0.01, min: 0 }}
                                                 disabled={!riApplied}
                                             />
+                                        </Grid>
+                                        <Grid item xs={12}>
+                                            <Slider
+                                                value={riDiscount}
+                                                onChange={(e, v) => {
+                                                    setRiDiscount(v);
+                                                    if (riApplied) {
+                                                        setRiPrice(Math.round(onDemandPrice * (1 - v / 100) * 10000) / 10000);
+                                                    }
+                                                }}
+                                                min={0}
+                                                max={90}
+                                                step={1}
+                                                valueLabelDisplay="auto"
+                                                valueLabelFormat={(v) => `${v}%`}
+                                                disabled={!riApplied}
+                                                marks={[
+                                                    { value: 0, label: '0%' },
+                                                    { value: 30, label: '30%' },
+                                                    { value: 60, label: '60%' },
+                                                    { value: 90, label: '90%' }
+                                                ]}
+                                            />
+                                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', textAlign: 'center', mb: 1 }}>
+                                                RI Discount: {riDiscount}%
+                                            </Typography>
                                         </Grid>
                                         <Grid item xs={12}>
                                             <Chip
@@ -287,6 +442,7 @@
                                                 value={detectedIdleHours}
                                                 onChange={(e) => setDetectedIdleHours(Math.max(0, Math.min(168, parseInt(e.target.value) || 0)))}
                                                 inputProps={{ step: 1, min: 0, max: 168 }}
+                                                disabled={riApplied}
                                             />
                                         </Grid>
                                         <Grid item xs={6}>
@@ -298,14 +454,20 @@
                                                 value={scheduledShutdownHours}
                                                 onChange={(e) => setScheduledShutdownHours(Math.max(0, Math.min(168, parseInt(e.target.value) || 0)))}
                                                 inputProps={{ step: 1, min: 0, max: 168 }}
+                                                disabled={riApplied}
                                             />
                                         </Grid>
                                         <Grid item xs={12}>
                                             <Chip
                                                 label={`Coverage: ${detectedIdleHours > 0 ? Math.round((scheduledShutdownHours / detectedIdleHours) * 100) : 100}%`}
-                                                color={scheduledShutdownHours >= detectedIdleHours ? 'success' : 'warning'}
+                                                color={scheduledShutdownHours > detectedIdleHours ? 'error' : scheduledShutdownHours >= detectedIdleHours ? 'success' : 'warning'}
                                                 size="small"
                                             />
+                                            {scheduledShutdownHours > detectedIdleHours && (
+                                                <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
+                                                    Over-provisioned: shutting down {scheduledShutdownHours - detectedIdleHours}h during active hours
+                                                </Typography>
+                                            )}
                                         </Grid>
                                     </Grid>
 
@@ -313,26 +475,23 @@
                                     <Typography variant="subtitle2" gutterBottom color="primary" fontWeight={600}>
                                         CPU Utilization (%)
                                     </Typography>
-                                    <Box sx={{ px: 2 }}>
+                                    <Box sx={{ px: 2, position: 'relative' }}>
+                                        <Tooltip title="60% is the ideal CPU utilization target" placement="top">
+                                            <Box sx={{ position: 'absolute', left: '60%', top: -2, transform: 'translateX(-50%)', zIndex: 1, width: 3, height: 12, backgroundColor: '#4caf50', borderRadius: 1 }} />
+                                        </Tooltip>
                                         <Slider
-                                            value={cpuPercent}
-                                            onChange={(e, v) => setCpuPercent(v)}
+                                            value={currentCpuMap[instanceType]}
+                                            disabled
                                             min={0}
                                             max={100}
                                             step={1}
                                             valueLabelDisplay="on"
                                             marks={[
                                                 { value: 0, label: '0%' },
-                                                { value: 60, label: '60% (ideal)' },
-                                                { value: 100, label: '100%' }
+                                                { value: 100, label: '100%' },
+                                                { value: currentCpu, label: `${currentCpu}% (current)` },
+                                                ...(instanceType !== currentInstanceType ? [{ value: currentCpuMap[instanceType], label: `${currentCpuMap[instanceType]}% (after)` }] : [])
                                             ]}
-                                            sx={{
-                                                '& .MuiSlider-mark[data-index="1"]': {
-                                                    backgroundColor: '#4caf50',
-                                                    height: 12,
-                                                    width: 3
-                                                }
-                                            }}
                                         />
                                     </Box>
                                 </Paper>
@@ -379,7 +538,7 @@
                                     color={cpuColor}
                                 >
                                     <Typography variant="body2" color="text.secondary">
-                                        {cpuPercent}% CPU (target: 60%)
+                                        {currentCpuMap[instanceType]}% CPU (target: 60%)
                                     </Typography>
                                 </FactorCard>
                             </Grid>
